@@ -14,16 +14,20 @@
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: #f5f5f5;
-            padding: 10px;
+            padding: 10px 0 0 0;
+            margin: 0;
+            min-height: 100vh;
         }
         
         .container {
             display: grid;
-            grid-template-columns: minmax(320px, 350px) 1fr;
+            grid-template-columns: minmax(280px, 360px) 1fr;
             gap: 10px;
+            width: 100%;
             height: 98vh;
-            max-width: 1800px;
-            margin: 0 auto;
+            max-width: none;
+            margin: 0;
+            padding: 0 10px 10px;
         }
         
         .panel {
@@ -231,7 +235,7 @@
             font-weight: bold;
             font-size: 13px;
             padding: 4px 10px;
-            cursor: grab;
+            cursor: crosshair;
             user-select: none;
             white-space: nowrap;
             min-height: 22px;
@@ -240,8 +244,43 @@
             justify-content: center;
             margin-bottom: 4px;
         }
-        .column-label-box:active {
+        .design-viewport {
+            flex: 1;
+            min-height: 0;
+            position: relative;
+            overflow: hidden;
+            border: 2px dashed #999;
+            border-radius: 6px;
+            background: #fafafa;
+        }
+        .design-inner {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform-origin: center center;
+        }
+        .design-inner canvas {
+            display: block;
+        }
+        .design-overlay {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .design-overlay .column-control {
+            pointer-events: auto;
+        }
+        .design-viewport.pan-cursor {
+            cursor: grab;
+        }
+        .design-viewport.pan-cursor:active {
             cursor: grabbing;
+        }
+        .design-viewport.socket-cursor {
+            cursor: crosshair;
         }
     </style>
 </head>
@@ -331,31 +370,29 @@
         <div class="panel right-panel">
             <div class="preview-header" style="display: flex; align-items: center; gap: 16px; margin-bottom: 8px; flex-shrink: 0;">
                 <h1 style="margin-bottom: 0;">Real-time Preview</h1>
-                <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: #666;">
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #666;">
                     Zoom:
-                    <input type="range" id="zoomSlider" min="25" max="200" value="100" style="width: 100px;">
+                    <input type="range" id="zoomSlider" min="25" max="200" value="100" style="width: 220px;">
                     <span id="zoomValue">100%</span>
                 </label>
             </div>
             <div class="preview-viewport" style="display: flex; flex: 1; min-height: 0; gap: 8px;">
                 <div class="pan-y-slider-wrap" style="display: flex; flex-direction: column; align-items: center; flex-shrink: 0;">
                     <span style="font-size: 10px; color: #666;">Pan Y</span>
-                    <div style="height: 120px; display: flex; align-items: center;">
-                        <input type="range" id="panYSlider" min="-200" max="200" value="0" style="width: 120px; transform: rotate(-90deg); margin: 0;">
+                    <div style="height: 100px; display: flex; align-items: center;">
+                        <input type="range" id="panYSlider" min="-100" max="100" value="0" style="width: 100px; transform: rotate(-90deg); margin: 0;">
                     </div>
                 </div>
                 <div style="display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0;">
-                    <div class="canvas-wrap" id="canvasWrap" style="position:relative; flex:1; min-height:0; overflow:auto;">
-                        <div id="zoomContainer" style="position: relative; transform-origin: 0 0;">
-                            <div id="scaleDiv" style="position: absolute; transform-origin: 0 0;">
-                                <canvas id="preview"></canvas>
-                            </div>
-                            <div id="columnInputsOverlay" style="position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;"></div>
+                    <div class="design-viewport" id="designViewport">
+                        <div class="design-inner" id="designInner">
+                            <canvas id="preview"></canvas>
                         </div>
+                        <div id="columnInputsOverlay" class="design-overlay"></div>
                     </div>
                     <div class="pan-x-slider-wrap" style="display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 4px 0;">
                         <span style="font-size: 10px; color: #666;">Pan X</span>
-                        <input type="range" id="panXSlider" min="-200" max="200" value="0" style="flex: 1;">
+                        <input type="range" id="panXSlider" min="-100" max="100" value="0" style="flex: 1;">
                     </div>
                 </div>
             </div>
@@ -375,12 +412,14 @@
         let socketPositions = {};   // node -> [x_mm, y_mm] (optional override; socket drag or import)
         let dragNode = null;
         let dragColumn = null;
+        let dragView = false;
+        let lastPanMousePx = [0, 0];
         let columnCenterPx = {};    // col -> x pixel (for overlay positioning)
-        let previewZoom = 1;        // 0.25 to 2
-        let baseCanvasW = 400, baseCanvasH = 300;
-        let panX = 0, panY = 0;     // pan in pixels, range e.g. -200 to 200
-        const PAN_MARGIN = 200;
-        const PAN_RANGE = 200;
+        let previewZoom = 1;
+        let panX = 0, panY = 0;
+        let designDisplayW = 400, designDisplayH = 300;
+        let viewportW = 400, viewportH = 300;
+        let maxPanX = 0, maxPanY = 0;
         
         // Initialize
         function init() {
@@ -506,47 +545,61 @@
             
             updateScaleDisplay();
             generateConnections();
-            drawCanvas();
+            reframeDesign();
             setStatus('Preview updated');
         }
         
-        // Draw canvas
+        function reframeDesign() {
+            document.getElementById('zoomSlider').value = 100;
+            panX = 0;
+            panY = 0;
+            var sx = document.getElementById('panXSlider');
+            var sy = document.getElementById('panYSlider');
+            if (sx) sx.value = 0;
+            if (sy) sy.value = 0;
+            drawCanvas();
+        }
+        
+        // Draw canvas: only the design viewport content; zoom/pan apply only inside the dashed frame
         function drawCanvas() {
             const canvas = document.getElementById('preview');
             const ctx = canvas.getContext('2d');
-            const wrap = document.getElementById('canvasWrap');
-            const zoomContainer = document.getElementById('zoomContainer');
-            const scaleDiv = document.getElementById('scaleDiv');
+            const viewportEl = document.getElementById('designViewport');
+            const designInner = document.getElementById('designInner');
+            
+            if (!viewportEl || !designInner) return;
+            
+            viewportW = viewportEl.clientWidth;
+            viewportH = viewportEl.clientHeight;
+            if (viewportW <= 0 || viewportH <= 0) return;
             
             previewZoom = (document.getElementById('zoomSlider')?.value ?? 100) / 100;
             document.getElementById('zoomValue').textContent = Math.round(previewZoom * 100) + '%';
             
-            if (wrap && wrap.clientWidth && wrap.clientHeight && previewZoom === 1) {
-                baseCanvasW = wrap.clientWidth;
-                baseCanvasH = wrap.clientHeight;
-            }
-            canvas.width = baseCanvasW;
-            canvas.height = baseCanvasH;
-            const zoomW = baseCanvasW * previewZoom;
-            const zoomH = baseCanvasH * previewZoom;
-            const centerOffsetX = (zoomW - baseCanvasW) / 2;
-            const centerOffsetY = (zoomH - baseCanvasH) / 2;
-            scaleDiv.style.width = baseCanvasW + 'px';
-            scaleDiv.style.height = baseCanvasH + 'px';
-            scaleDiv.style.transform = `scale(${previewZoom})`;
-            scaleDiv.style.transformOrigin = '0 0';
-            scaleDiv.style.position = 'absolute';
-            scaleDiv.style.left = (PAN_MARGIN + centerOffsetX + panX) + 'px';
-            scaleDiv.style.top = (PAN_MARGIN + centerOffsetY + panY) + 'px';
-            zoomContainer.style.width = (zoomW + 2 * PAN_MARGIN) + 'px';
-            zoomContainer.style.height = (zoomH + 2 * PAN_MARGIN) + 'px';
-            zoomContainer.style.position = 'relative';
-            requestAnimationFrame(function() {
-                if (wrap && wrap.clientWidth && wrap.clientHeight) {
-                    wrap.scrollLeft = (zoomContainer.scrollWidth - wrap.clientWidth) / 2;
-                    wrap.scrollTop = (zoomContainer.scrollHeight - wrap.clientHeight) / 2;
-                }
-            });
+            var scaleX = parseFloat(document.getElementById('scaleX').value);
+            var scaleY = parseFloat(document.getElementById('scaleY').value);
+            var aspectRatio = scaleX / scaleY;
+            designDisplayW = Math.min(viewportW, viewportH * aspectRatio);
+            designDisplayH = Math.min(viewportH, viewportW / aspectRatio);
+            if (designDisplayW < 1) designDisplayW = viewportW;
+            if (designDisplayH < 1) designDisplayH = viewportH;
+            
+            maxPanX = Math.max(0, (designDisplayW * previewZoom - viewportW) / 2);
+            maxPanY = Math.max(0, (designDisplayH * previewZoom - viewportH) / 2);
+            var panXSlider = document.getElementById('panXSlider');
+            var panYSlider = document.getElementById('panYSlider');
+            panX = maxPanX > 0 ? (parseFloat(panXSlider?.value || 0) / 100) * maxPanX : 0;
+            panY = maxPanY > 0 ? (parseFloat(panYSlider?.value || 0) / 100) * maxPanY : 0;
+            panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+            panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+            if (panXSlider) panXSlider.value = maxPanX > 0 ? Math.round((panX / maxPanX) * 100) : 0;
+            if (panYSlider) panYSlider.value = maxPanY > 0 ? Math.round((panY / maxPanY) * 100) : 0;
+            
+            designInner.style.width = designDisplayW + 'px';
+            designInner.style.height = designDisplayH + 'px';
+            designInner.style.transform = 'translate(-50%, -50%) translate(' + panX + 'px, ' + panY + 'px) scale(' + previewZoom + ')';
+            canvas.width = designDisplayW;
+            canvas.height = designDisplayH;
             
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
@@ -560,30 +613,11 @@
                 return;
             }
             
-            // Get scale aspect ratio
-            const scaleX = parseFloat(document.getElementById('scaleX').value);
-            const scaleY = parseFloat(document.getElementById('scaleY').value);
-            const aspectRatio = scaleX / scaleY;
+            var drawW = designDisplayW;
+            var drawH = designDisplayH;
+            var offsetX = 0;
+            var offsetY = 0;
             
-            // Calculate drawable area respecting aspect ratio
-            const canvasAspect = canvas.width / canvas.height;
-            let drawW, drawH, offsetX, offsetY;
-            
-            if (aspectRatio > canvasAspect) {
-                // Width-constrained
-                drawW = canvas.width;
-                drawH = canvas.width / aspectRatio;
-                offsetX = 0;
-                offsetY = (canvas.height - drawH) / 2;
-            } else {
-                // Height-constrained
-                drawH = canvas.height;
-                drawW = canvas.height * aspectRatio;
-                offsetX = (canvas.width - drawW) / 2;
-                offsetY = 0;
-            }
-            
-            // Draw aspect ratio border
             ctx.strokeStyle = '#999';
             ctx.lineWidth = 2;
             ctx.setLineDash([5, 5]);
@@ -649,24 +683,28 @@
             ctx.fillText(`Scale: ${scaleX}m × ${scaleY}m (Aspect: ${aspectRatio.toFixed(2)}:1)`, 
                         canvas.width / 2, canvas.height - 10);
             
-            window._lastDrawState = { offsetX, offsetY, drawW, drawH, widthMm, heightMm, positions, positionsMm, columnCenterPx: Object.assign({}, columnCenterPx), labelY: offsetY + 20 };
+            window._lastDrawState = { offsetX, offsetY, drawW, drawH, widthMm, heightMm, positions, positionsMm, columnCenterPx: Object.assign({}, columnCenterPx), labelY: offsetY + 20, viewportW, viewportH, designDisplayW, designDisplayH };
             updateColumnOverlay();
+        }
+        
+        function designToViewportX(cx) {
+            return viewportW / 2 + panX + (cx - designDisplayW / 2) * previewZoom;
+        }
+        function designToViewportY(cy) {
+            return viewportH / 2 + panY + (cy - designDisplayH / 2) * previewZoom;
         }
         
         function updateColumnOverlay() {
             const overlay = document.getElementById('columnInputsOverlay');
             if (!overlay) return;
             const cols = Object.keys(columnCenterPx).map(Number).sort((a, b) => a - b);
-            const scaleDivLeft = PAN_MARGIN + (baseCanvasW * previewZoom - baseCanvasW) / 2 + panX;
-            const scaleDivTop = PAN_MARGIN + (baseCanvasH * previewZoom - baseCanvasH) / 2 + panY;
             const labelY = (window._lastDrawState && window._lastDrawState.labelY != null) ? window._lastDrawState.labelY : 20;
-            const labelTopOffset = labelY * previewZoom - 11;
             overlay.innerHTML = '';
             cols.forEach(col => {
                 const div = document.createElement('div');
                 div.className = 'column-control';
-                div.style.left = (scaleDivLeft + (columnCenterPx[col] || 0) * previewZoom) + 'px';
-                div.style.top = (scaleDivTop + Math.max(4, labelTopOffset)) + 'px';
+                div.style.left = designToViewportX(columnCenterPx[col] || 0) + 'px';
+                div.style.top = designToViewportY(labelY) + 'px';
                 const labelEl = document.createElement('div');
                 labelEl.className = 'column-label-box';
                 labelEl.textContent = 'Col ' + col;
@@ -927,7 +965,7 @@
                 }
                 
                 updateScaleDisplay();
-                drawCanvas();
+                reframeDesign();
                 
                 document.getElementById('connectionCount').textContent = `Connections: ${connections.length}`;
                 setStatus(`Imported complete design: ${connections.length} connections`);
@@ -1193,11 +1231,11 @@
         });
         document.getElementById('scaleX').addEventListener('input', function() {
             updateScaleDisplay();
-            if (connections.length > 0) drawCanvas();
+            if (connections.length > 0) reframeDesign();
         });
         document.getElementById('scaleY').addEventListener('input', function() {
             updateScaleDisplay();
-            if (connections.length > 0) drawCanvas();
+            if (connections.length > 0) reframeDesign();
         });
         document.getElementById('selectedThread').addEventListener('input', function() {
             const threadId = parseInt(this.value);
@@ -1211,11 +1249,9 @@
             drawCanvas();
         });
         document.getElementById('panXSlider').addEventListener('input', function() {
-            panX = parseInt(this.value);
             drawCanvas();
         });
         document.getElementById('panYSlider').addEventListener('input', function() {
-            panY = parseInt(this.value);
             drawCanvas();
         });
         
@@ -1269,12 +1305,57 @@
                 if (s && s.positionsMm && !socketPositions[node]) {
                     socketPositions[node] = s.positionsMm[node].slice();
                 }
+                return;
+            }
+            dragView = true;
+            lastPanMousePx = [e.clientX, e.clientY];
+            document.addEventListener('mousemove', docPanMove);
+            document.addEventListener('mouseup', docPanUp);
+        }
+        
+        function docPanMove(e) {
+            if (!dragView) return;
+            var dx = e.clientX - lastPanMousePx[0];
+            var dy = e.clientY - lastPanMousePx[1];
+            lastPanMousePx = [e.clientX, e.clientY];
+            panX = Math.max(-maxPanX, Math.min(maxPanX, panX + dx));
+            panY = Math.max(-maxPanY, Math.min(maxPanY, panY + dy));
+            var sx = document.getElementById('panXSlider');
+            var sy = document.getElementById('panYSlider');
+            if (sx) sx.value = maxPanX > 0 ? Math.round((panX / maxPanX) * 100) : 0;
+            if (sy) sy.value = maxPanY > 0 ? Math.round((panY / maxPanY) * 100) : 0;
+            drawCanvas();
+        }
+        
+        function docPanUp() {
+            dragView = false;
+            document.removeEventListener('mousemove', docPanMove);
+            document.removeEventListener('mouseup', docPanUp);
+        }
+        
+        function updateCanvasCursor(px, py) {
+            const viewportEl = document.getElementById('designViewport');
+            if (!viewportEl) return;
+            const node = hitTestSocket(px, py);
+            const col = hitTestColumnLabel(px, py);
+            viewportEl.classList.remove('pan-cursor', 'socket-cursor');
+            if (node || col != null) {
+                viewportEl.classList.add('socket-cursor');
+            } else {
+                viewportEl.classList.add('pan-cursor');
             }
         }
         
         function canvasMouseMove(e) {
             const [px, py] = getCanvasMouse(e);
             const s = window._lastDrawState;
+            
+            if (dragView) return;
+            
+            if (connections.length > 0 && s) {
+                updateCanvasCursor(px, py);
+            }
+            
             if (!s) return;
             const dxPx = px - lastMousePx[0], dyPx = py - lastMousePx[1];
             const dxMm = dxPx * (s.widthMm / s.drawW), dyMm = dyPx * (s.heightMm / s.drawH);
@@ -1306,8 +1387,19 @@
         }
         
         function canvasMouseUp() {
-            dragColumn = null;
-            dragNode = null;
+            if (dragView) {
+                docPanUp();
+            } else {
+                dragColumn = null;
+                dragNode = null;
+            }
+            var viewportEl = document.getElementById('designViewport');
+            if (viewportEl) viewportEl.classList.remove('pan-cursor', 'socket-cursor');
+        }
+        
+        function canvasMouseLeave() {
+            var viewportEl = document.getElementById('designViewport');
+            if (viewportEl) viewportEl.classList.remove('pan-cursor', 'socket-cursor');
         }
         
         // Initialize on load
@@ -1317,7 +1409,10 @@
             canvas.addEventListener('mousedown', canvasMouseDown);
             canvas.addEventListener('mousemove', canvasMouseMove);
             canvas.addEventListener('mouseup', canvasMouseUp);
-            canvas.addEventListener('mouseleave', canvasMouseUp);
+            canvas.addEventListener('mouseleave', function() {
+                canvasMouseUp();
+                canvasMouseLeave();
+            });
         });
         window.addEventListener('resize', drawCanvas);
     </script>

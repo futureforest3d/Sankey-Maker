@@ -223,6 +223,26 @@
         #columnInputsOverlay {
             overflow: visible;
         }
+        .column-label-box {
+            background: rgba(30, 100, 200, 0.95);
+            border: 1.5px solid #1a5fb4;
+            border-radius: 4px;
+            color: #fff;
+            font-weight: bold;
+            font-size: 13px;
+            padding: 4px 10px;
+            cursor: grab;
+            user-select: none;
+            white-space: nowrap;
+            min-height: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 4px;
+        }
+        .column-label-box:active {
+            cursor: grabbing;
+        }
     </style>
 </head>
 <body>
@@ -620,28 +640,7 @@
                 ctx.fill();
             }
             
-            // Draw column labels: blue box + text (always visible, draggable)
             const labelY = offsetY + 20;
-            ctx.font = 'bold 12px Arial';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            for (const col of Object.keys(columnCenterPx).map(Number).sort((a,b)=>a-b)) {
-                const text = `Col ${col}`;
-                const m = ctx.measureText(text);
-                const pad = 6;
-                const boxW = m.width + pad * 2;
-                const boxH = 18;
-                const x = columnCenterPx[col];
-                ctx.fillStyle = 'rgba(30, 100, 200, 0.95)';
-                ctx.strokeStyle = '#1a5fb4';
-                ctx.lineWidth = 1.5;
-                roundRect(ctx, x - boxW/2, labelY - boxH/2, boxW, boxH, 4);
-                ctx.fill();
-                ctx.stroke();
-                ctx.fillStyle = '#fff';
-                ctx.fillText(text, x, labelY);
-            }
-            ctx.textBaseline = 'alphabetic';
             
             // Display aspect ratio and scale info
             ctx.fillStyle = '#666';
@@ -660,12 +659,23 @@
             const cols = Object.keys(columnCenterPx).map(Number).sort((a, b) => a - b);
             const scaleDivLeft = PAN_MARGIN + (baseCanvasW * previewZoom - baseCanvasW) / 2 + panX;
             const scaleDivTop = PAN_MARGIN + (baseCanvasH * previewZoom - baseCanvasH) / 2 + panY;
+            const labelY = (window._lastDrawState && window._lastDrawState.labelY != null) ? window._lastDrawState.labelY : 20;
+            const labelTopOffset = labelY * previewZoom - 11;
             overlay.innerHTML = '';
             cols.forEach(col => {
                 const div = document.createElement('div');
                 div.className = 'column-control';
                 div.style.left = (scaleDivLeft + (columnCenterPx[col] || 0) * previewZoom) + 'px';
-                div.style.top = (scaleDivTop + 8) + 'px';
+                div.style.top = (scaleDivTop + Math.max(4, labelTopOffset)) + 'px';
+                const labelEl = document.createElement('div');
+                labelEl.className = 'column-label-box';
+                labelEl.textContent = 'Col ' + col;
+                labelEl.dataset.col = col;
+                labelEl.addEventListener('mousedown', function(e) {
+                    e.preventDefault();
+                    dragColumn = parseInt(this.dataset.col);
+                    lastMousePx = getCanvasMouse(e);
+                });
                 const inp = document.createElement('input');
                 inp.type = 'number';
                 inp.className = 'socket-input';
@@ -683,6 +693,7 @@
                 btn.textContent = 'Align';
                 btn.dataset.col = col;
                 btn.addEventListener('click', function() { alignColumn(parseInt(this.dataset.col)); });
+                div.appendChild(labelEl);
                 div.appendChild(inp);
                 div.appendChild(btn);
                 overlay.appendChild(div);

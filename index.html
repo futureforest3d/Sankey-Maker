@@ -19,7 +19,7 @@
         
         .container {
             display: grid;
-            grid-template-columns: 350px 1fr;
+            grid-template-columns: minmax(320px, 350px) 1fr;
             gap: 10px;
             height: 98vh;
             max-width: 1800px;
@@ -34,12 +34,15 @@
         }
         
         .left-panel {
+            min-height: 0;
             overflow-y: auto;
+            overflow-x: hidden;
         }
         
         .right-panel {
             display: flex;
             flex-direction: column;
+            min-height: 0;
         }
         
         h1 {
@@ -193,6 +196,33 @@
         input[type="radio"] {
             cursor: pointer;
         }
+        
+        .column-control {
+            position: absolute;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            pointer-events: auto;
+            transform: translateX(-50%);
+            overflow: visible;
+            z-index: 10;
+        }
+        .column-control input.socket-input {
+            min-width: 42px;
+            width: 42px;
+            padding: 4px 6px;
+            font-size: 13px;
+            text-align: center;
+            box-sizing: border-box;
+        }
+        .column-control .align-btn {
+            padding: 4px 8px;
+            font-size: 11px;
+            margin-top: 4px;
+        }
+        #columnInputsOverlay {
+            overflow: visible;
+        }
     </style>
 </head>
 <body>
@@ -202,23 +232,12 @@
             <h1>🎨 Sankey Controls</h1>
             
             <div class="section">
-                <h2>Column & Socket Parameters</h2>
+                <h2>Columns</h2>
                 <div class="param-row">
-                    <label>Columns:</label>
-                    <input type="number" id="numColumns" value="6" min="2" max="20">
+                    <label>Number of columns:</label>
+                    <input type="number" id="numColumns" value="6" min="2" max="20" title="Press Enter to apply">
                 </div>
-                
-                <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
-                
-                <div class="param-row">
-                    <label>Column:</label>
-                    <input type="number" id="selectedColumn" value="0" min="0">
-                    <label style="flex: 0 0 60px;">Sockets:</label>
-                    <input type="number" id="socketsValue" value="10" min="1">
-                </div>
-                <button onclick="setSocketCount()" style="width: 100%; margin-top: 8px;">Set Sockets</button>
-                
-                <div class="value-display" id="socketDisplay">Current: Col0:10</div>
+                <div class="info-text">Press Enter to apply</div>
             </div>
             
             <div class="section">
@@ -290,10 +309,38 @@
         
         <!-- Right Panel: Preview -->
         <div class="panel right-panel">
-            <h1>Real-time Preview</h1>
-            <canvas id="preview"></canvas>
-            <div class="info-text" style="margin-top: 10px; text-align: center;">
-                Preview shows diagram structure. SVG export uses exact physical dimensions.
+            <div class="preview-header" style="display: flex; align-items: center; gap: 16px; margin-bottom: 8px; flex-shrink: 0;">
+                <h1 style="margin-bottom: 0;">Real-time Preview</h1>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: #666;">
+                    Zoom:
+                    <input type="range" id="zoomSlider" min="25" max="200" value="100" style="width: 100px;">
+                    <span id="zoomValue">100%</span>
+                </label>
+            </div>
+            <div class="preview-viewport" style="display: flex; flex: 1; min-height: 0; gap: 8px;">
+                <div class="pan-y-slider-wrap" style="display: flex; flex-direction: column; align-items: center; flex-shrink: 0;">
+                    <span style="font-size: 10px; color: #666;">Pan Y</span>
+                    <div style="height: 120px; display: flex; align-items: center;">
+                        <input type="range" id="panYSlider" min="-200" max="200" value="0" style="width: 120px; transform: rotate(-90deg); margin: 0;">
+                    </div>
+                </div>
+                <div style="display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0;">
+                    <div class="canvas-wrap" id="canvasWrap" style="position:relative; flex:1; min-height:0; overflow:auto;">
+                        <div id="zoomContainer" style="position: relative; transform-origin: 0 0;">
+                            <div id="scaleDiv" style="position: absolute; transform-origin: 0 0;">
+                                <canvas id="preview"></canvas>
+                            </div>
+                            <div id="columnInputsOverlay" style="position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;"></div>
+                        </div>
+                    </div>
+                    <div class="pan-x-slider-wrap" style="display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 4px 0;">
+                        <span style="font-size: 10px; color: #666;">Pan X</span>
+                        <input type="range" id="panXSlider" min="-200" max="200" value="0" style="flex: 1;">
+                    </div>
+                </div>
+            </div>
+            <div class="info-text" style="margin-top: 10px; text-align: center; flex-shrink: 0;">
+                Preview shows diagram structure. Drag sockets to adjust; drag column label to move column. SVG export uses exact physical dimensions.
             </div>
         </div>
     </div>
@@ -304,6 +351,16 @@
         let socketsPerColumn = {};
         let threadSeeds = {};
         let numColumns = 6;
+        let columnX = {};           // col -> x_mm (optional; column drag)
+        let socketPositions = {};   // node -> [x_mm, y_mm] (optional override; socket drag or import)
+        let dragNode = null;
+        let dragColumn = null;
+        let columnCenterPx = {};    // col -> x pixel (for overlay positioning)
+        let previewZoom = 1;        // 0.25 to 2
+        let baseCanvasW = 400, baseCanvasH = 300;
+        let panX = 0, panY = 0;     // pan in pixels, range e.g. -200 to 200
+        const PAN_MARGIN = 200;
+        const PAN_RANGE = 200;
         
         // Initialize
         function init() {
@@ -314,18 +371,8 @@
                     threadSeeds[i] = 42;
                 }
             }
-            updateSocketDisplay();
             updateScaleDisplay();
             updatePreview();
-        }
-        
-        // Update displays
-        function updateSocketDisplay() {
-            const parts = [];
-            for (let i = 0; i < numColumns; i++) {
-                parts.push(`Col${i}:${socketsPerColumn[i] || 10}`);
-            }
-            document.getElementById('socketDisplay').textContent = 'Current: ' + parts.join(', ');
         }
         
         function updateScaleDisplay() {
@@ -335,19 +382,6 @@
             const ymm = (y * 1000).toFixed(0);
             document.getElementById('scaleDisplay').textContent = 
                 `${x}m × ${y}m (${xmm}mm × ${ymm}mm)`;
-        }
-        
-        // Socket configuration
-        function setSocketCount() {
-            const col = parseInt(document.getElementById('selectedColumn').value);
-            const sockets = parseInt(document.getElementById('socketsValue').value);
-            
-            if (col >= 0 && col < numColumns && sockets > 0) {
-                socketsPerColumn[col] = sockets;
-                updateSocketDisplay();
-                updatePreview();
-                setStatus(`Column ${col} set to ${sockets} sockets`);
-            }
         }
         
         // Thread seed control
@@ -387,43 +421,36 @@
             setStatus('Auto-generated with random seeds');
         }
         
-        // Generate connections from parameters
+        // Generate connections from parameters.
+        // Only column 0 defines the total number of lines; each line is one path from Col0 to last column.
         function generateConnections() {
             connections = [];
+            const nLines = socketsPerColumn[0] || 10;
             
-            for (let threadId = 0; threadId < numColumns - 1; threadId++) {
-                const colFrom = threadId;
-                const colTo = threadId + 1;
+            for (let lineId = 0; lineId < nLines; lineId++) {
+                const path = [];
+                let current = `Col0_Socket${lineId}`;
                 
-                const socketsFrom = socketsPerColumn[colFrom] || 10;
-                const socketsTo = socketsPerColumn[colTo] || 10;
-                const seed = threadSeeds[threadId] || 42;
-                
-                // Seed random number generator
-                seededRandom(seed);
-                
-                // Generate connections
-                for (let i = 0; i < socketsFrom; i++) {
-                    const source = `Col${colFrom}_Socket${i}`;
-                    const numConn = Math.min(3, Math.max(1, Math.floor(socketsTo / Math.max(1, socketsFrom / 2))));
+                for (let threadId = 0; threadId < numColumns - 1; threadId++) {
+                    const colTo = threadId + 1;
+                    const socketsTo = socketsPerColumn[colTo] || 10;
+                    const seed = threadSeeds[threadId] || 42;
+                    seededRandom(seed + lineId * 1000);
                     
-                    const targets = [];
-                    while (targets.length < numConn) {
-                        const targetIdx = Math.floor(seededRandom() * socketsTo);
-                        if (!targets.includes(targetIdx)) {
-                            targets.push(targetIdx);
-                        }
-                    }
+                    const targetIdx = Math.floor(seededRandom() * socketsTo);
+                    const target = `Col${colTo}_Socket${targetIdx}`;
+                    const value = Math.floor(seededRandom() * 9) + 1;
                     
-                    for (const targetIdx of targets) {
-                        const target = `Col${colTo}_Socket${targetIdx}`;
-                        const value = Math.floor(seededRandom() * 9) + 1;
-                        connections.push({ source, target, value });
-                    }
+                    path.push({ source: current, target, value });
+                    current = target;
+                }
+                
+                for (const edge of path) {
+                    connections.push(edge);
                 }
             }
             
-            document.getElementById('connectionCount').textContent = `Connections: ${connections.length}`;
+            document.getElementById('connectionCount').textContent = `Connections: ${connections.length} (${nLines} lines from Col0)`;
         }
         
         // Seeded random number generator
@@ -454,10 +481,7 @@
                 }
                 
                 // Update UI limits
-                document.getElementById('selectedColumn').max = numColumns - 1;
                 document.getElementById('selectedThread').max = Math.max(0, numColumns - 2);
-                
-                updateSocketDisplay();
             }
             
             updateScaleDisplay();
@@ -470,9 +494,39 @@
         function drawCanvas() {
             const canvas = document.getElementById('preview');
             const ctx = canvas.getContext('2d');
+            const wrap = document.getElementById('canvasWrap');
+            const zoomContainer = document.getElementById('zoomContainer');
+            const scaleDiv = document.getElementById('scaleDiv');
             
-            canvas.width = canvas.offsetWidth;
-            canvas.height = canvas.offsetHeight;
+            previewZoom = (document.getElementById('zoomSlider')?.value ?? 100) / 100;
+            document.getElementById('zoomValue').textContent = Math.round(previewZoom * 100) + '%';
+            
+            if (wrap && wrap.clientWidth && wrap.clientHeight && previewZoom === 1) {
+                baseCanvasW = wrap.clientWidth;
+                baseCanvasH = wrap.clientHeight;
+            }
+            canvas.width = baseCanvasW;
+            canvas.height = baseCanvasH;
+            const zoomW = baseCanvasW * previewZoom;
+            const zoomH = baseCanvasH * previewZoom;
+            const centerOffsetX = (zoomW - baseCanvasW) / 2;
+            const centerOffsetY = (zoomH - baseCanvasH) / 2;
+            scaleDiv.style.width = baseCanvasW + 'px';
+            scaleDiv.style.height = baseCanvasH + 'px';
+            scaleDiv.style.transform = `scale(${previewZoom})`;
+            scaleDiv.style.transformOrigin = '0 0';
+            scaleDiv.style.position = 'absolute';
+            scaleDiv.style.left = (PAN_MARGIN + centerOffsetX + panX) + 'px';
+            scaleDiv.style.top = (PAN_MARGIN + centerOffsetY + panY) + 'px';
+            zoomContainer.style.width = (zoomW + 2 * PAN_MARGIN) + 'px';
+            zoomContainer.style.height = (zoomH + 2 * PAN_MARGIN) + 'px';
+            zoomContainer.style.position = 'relative';
+            requestAnimationFrame(function() {
+                if (wrap && wrap.clientWidth && wrap.clientHeight) {
+                    wrap.scrollLeft = (zoomContainer.scrollWidth - wrap.clientWidth) / 2;
+                    wrap.scrollTop = (zoomContainer.scrollHeight - wrap.clientHeight) / 2;
+                }
+            });
             
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
@@ -481,6 +535,8 @@
                 ctx.font = '16px Arial';
                 ctx.textAlign = 'center';
                 ctx.fillText('Click UPDATE PREVIEW to generate diagram', canvas.width / 2, canvas.height / 2);
+                window._lastDrawState = null;
+                document.getElementById('columnInputsOverlay').innerHTML = '';
                 return;
             }
             
@@ -514,7 +570,23 @@
             ctx.strokeRect(offsetX, offsetY, drawW, drawH);
             ctx.setLineDash([]);
             
-            const positions = calculateNodePositions(drawW, drawH, offsetX, offsetY);
+            const [positionsMm, widthMm, heightMm] = calculatePositionsMm();
+            const toPx = (xMm, yMm) => [
+                offsetX + (xMm / widthMm) * drawW,
+                offsetY + (yMm / heightMm) * drawH
+            ];
+            const positions = {};
+            columnCenterPx = {};
+            for (const [node, xy] of Object.entries(positionsMm)) {
+                positions[node] = toPx(xy[0], xy[1]);
+                const col = parseInt(node.split('_')[0].replace('Col', ''));
+                if (columnCenterPx[col] === undefined) columnCenterPx[col] = { sum: positions[node][0], n: 1 };
+                else { columnCenterPx[col].sum += positions[node][0]; columnCenterPx[col].n++; }
+            }
+            Object.keys(columnCenterPx).forEach(col => {
+                const o = columnCenterPx[col];
+                columnCenterPx[col] = o.sum / o.n;
+            });
             
             // Draw connections
             ctx.strokeStyle = '#3498db';
@@ -548,19 +620,28 @@
                 ctx.fill();
             }
             
-            // Draw column labels
-            ctx.fillStyle = '#333';
+            // Draw column labels: blue box + text (always visible, draggable)
+            const labelY = offsetY + 20;
             ctx.font = 'bold 12px Arial';
             ctx.textAlign = 'center';
-            
-            const drawnCols = new Set();
-            for (const [node, [x, y]] of Object.entries(positions)) {
-                const colNum = parseInt(node.split('_')[0].replace('Col', ''));
-                if (!drawnCols.has(colNum)) {
-                    ctx.fillText(`Col ${colNum}`, x, offsetY + 20);
-                    drawnCols.add(colNum);
-                }
+            ctx.textBaseline = 'middle';
+            for (const col of Object.keys(columnCenterPx).map(Number).sort((a,b)=>a-b)) {
+                const text = `Col ${col}`;
+                const m = ctx.measureText(text);
+                const pad = 6;
+                const boxW = m.width + pad * 2;
+                const boxH = 18;
+                const x = columnCenterPx[col];
+                ctx.fillStyle = 'rgba(30, 100, 200, 0.95)';
+                ctx.strokeStyle = '#1a5fb4';
+                ctx.lineWidth = 1.5;
+                roundRect(ctx, x - boxW/2, labelY - boxH/2, boxW, boxH, 4);
+                ctx.fill();
+                ctx.stroke();
+                ctx.fillStyle = '#fff';
+                ctx.fillText(text, x, labelY);
             }
+            ctx.textBaseline = 'alphabetic';
             
             // Display aspect ratio and scale info
             ctx.fillStyle = '#666';
@@ -568,6 +649,52 @@
             ctx.textAlign = 'center';
             ctx.fillText(`Scale: ${scaleX}m × ${scaleY}m (Aspect: ${aspectRatio.toFixed(2)}:1)`, 
                         canvas.width / 2, canvas.height - 10);
+            
+            window._lastDrawState = { offsetX, offsetY, drawW, drawH, widthMm, heightMm, positions, positionsMm, columnCenterPx: Object.assign({}, columnCenterPx), labelY: offsetY + 20 };
+            updateColumnOverlay();
+        }
+        
+        function updateColumnOverlay() {
+            const overlay = document.getElementById('columnInputsOverlay');
+            if (!overlay) return;
+            const cols = Object.keys(columnCenterPx).map(Number).sort((a, b) => a - b);
+            const scaleDivLeft = PAN_MARGIN + (baseCanvasW * previewZoom - baseCanvasW) / 2 + panX;
+            const scaleDivTop = PAN_MARGIN + (baseCanvasH * previewZoom - baseCanvasH) / 2 + panY;
+            overlay.innerHTML = '';
+            cols.forEach(col => {
+                const div = document.createElement('div');
+                div.className = 'column-control';
+                div.style.left = (scaleDivLeft + (columnCenterPx[col] || 0) * previewZoom) + 'px';
+                div.style.top = (scaleDivTop + 8) + 'px';
+                const inp = document.createElement('input');
+                inp.type = 'number';
+                inp.className = 'socket-input';
+                inp.min = 1;
+                inp.value = socketsPerColumn[col] ?? 10;
+                inp.dataset.col = col;
+                inp.addEventListener('change', function() {
+                    const c = parseInt(this.dataset.col);
+                    const v = parseInt(this.value) || 1;
+                    socketsPerColumn[c] = v;
+                    updatePreview();
+                });
+                const btn = document.createElement('button');
+                btn.className = 'align-btn secondary';
+                btn.textContent = 'Align';
+                btn.dataset.col = col;
+                btn.addEventListener('click', function() { alignColumn(parseInt(this.dataset.col)); });
+                div.appendChild(inp);
+                div.appendChild(btn);
+                overlay.appendChild(div);
+            });
+        }
+        
+        function alignColumn(col) {
+            const columns = getColumnsFromConnections();
+            const nodes = Array.from(columns[col] || []);
+            nodes.forEach(n => { delete socketPositions[n]; });
+            drawCanvas();
+            setStatus(`Column ${col} aligned`);
         }
         
         function calculateNodePositions(width, height, offsetX, offsetY) {
@@ -612,6 +739,20 @@
             return positions;
         }
         
+        function roundRect(ctx, x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.moveTo(x + r, y);
+            ctx.lineTo(x + w - r, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+            ctx.lineTo(x + w, y + h - r);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+            ctx.lineTo(x + r, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+            ctx.lineTo(x, y + r);
+            ctx.quadraticCurveTo(x, y, x + r, y);
+            ctx.closePath();
+        }
+        
         function drawBezierCurve(ctx, x1, y1, x2, y2) {
             const dx = x2 - x1;
             const cx1 = x1 + dx * 0.5;
@@ -625,12 +766,13 @@
             ctx.stroke();
         }
         
-        // CSV Export with full parameters
+        // CSV Export with full parameters and socket positions (column#, socket#, X, Y)
         function exportCSV() {
             if (connections.length === 0) {
                 alert('No connections to export');
                 return;
             }
+            const [positionsMm] = calculatePositionsMm();
             
             let csv = '#SANKEY_PARAMETERS\n';
             csv += `num_columns,${numColumns}\n`;
@@ -645,6 +787,18 @@
             csv += '#THREAD_SEEDS\n';
             for (let i = 0; i < numColumns - 1; i++) {
                 csv += `thread_${i}_seed,${threadSeeds[i] || 42}\n`;
+            }
+            
+            csv += '#SOCKET_POSITIONS\n';
+            csv += 'column,socket,X,Y\n';
+            const socketRows = Object.entries(positionsMm).map(([node, xy]) => {
+                const col = parseInt(node.split('_')[0].replace('Col', ''));
+                const socket = parseInt(node.split('_Socket')[1]);
+                return { col, socket, x: xy[0], y: xy[1] };
+            });
+            socketRows.sort((a, b) => a.col !== b.col ? a.col - b.col : a.socket - b.socket);
+            for (const r of socketRows) {
+                csv += `${r.col},${r.socket},${r.x},${r.y}\n`;
             }
             
             csv += '#CONNECTIONS\n';
@@ -677,6 +831,7 @@
                 connections = [];
                 const tempSockets = {};
                 const tempSeeds = {};
+                const tempSocketPositions = {};
                 let tempNumCols = null;
                 let tempScaleX = null;
                 let tempScaleY = null;
@@ -689,6 +844,7 @@
                         if (parts[0] === '#SANKEY_PARAMETERS') mode = 'parameters';
                         else if (parts[0] === '#SOCKET_CONFIGURATION') mode = 'sockets';
                         else if (parts[0] === '#THREAD_SEEDS') mode = 'seeds';
+                        else if (parts[0] === '#SOCKET_POSITIONS') mode = 'socket_positions';
                         else if (parts[0] === '#CONNECTIONS') mode = 'connections';
                         continue;
                     }
@@ -706,6 +862,16 @@
                         if (parts[0].startsWith('thread_') && parts[0].endsWith('_seed')) {
                             const threadId = parseInt(parts[0].split('_')[1]);
                             tempSeeds[threadId] = parseInt(parts[1]);
+                        }
+                    } else if (mode === 'socket_positions') {
+                        if (parts[0] === 'column') continue; // Skip header
+                        if (parts.length >= 4) {
+                            const col = parseInt(parts[0]);
+                            const socket = parseInt(parts[1]);
+                            const x = parseFloat(parts[2]);
+                            const y = parseFloat(parts[3]);
+                            const node = `Col${col}_Socket${socket}`;
+                            tempSocketPositions[node] = [x, y];
                         }
                     } else if (mode === 'connections') {
                         if (parts[0] === 'source') continue; // Skip header
@@ -745,7 +911,10 @@
                     }
                 }
                 
-                updateSocketDisplay();
+                if (Object.keys(tempSocketPositions).length > 0) {
+                    socketPositions = tempSocketPositions;
+                }
+                
                 updateScaleDisplay();
                 drawCanvas();
                 
@@ -791,30 +960,56 @@
                 nodeType[conn.target] = tgtCol === 0 ? 'input' : (tgtCol === numColumns - 1 ? 'output' : 'joint');
             }
             
-            // Trace paths
-            const allPaths = [];
-            const inputNodes = Object.keys(nodeType).filter(n => nodeType[n] === 'input').sort();
+            // Get all Column 0 sockets (inputs) - sorted for consistency
+            const inputNodes = Object.keys(nodeType)
+                .filter(n => nodeType[n] === 'input')
+                .sort((a, b) => {
+                    const aSocket = parseInt(a.split('_Socket')[1]);
+                    const bSocket = parseInt(b.split('_Socket')[1]);
+                    return aSocket - bSocket;
+                });
             
-            function tracePaths(current, path, visited) {
+            // Trace exactly ONE path per input socket
+            const allPaths = [];
+            
+            function traceSinglePath(current, path, visited) {
+                // Trace one path from input to output - take first available connection
                 if (nodeType[current] === 'output') {
-                    allPaths.push([...path]);
-                    return;
+                    return true; // Found an output, path is complete
                 }
                 
-                if (visited.has(current)) return;
+                if (visited.has(current)) {
+                    return false; // Circular reference, abort
+                }
+                
                 visited.add(current);
                 
-                if (graph[current]) {
-                    for (const [next, value] of graph[current]) {
-                        path.push([current, next, value]);
-                        tracePaths(next, path, new Set(visited));
-                        path.pop();
-                    }
+                // Get connections from current node
+                const connections = graph[current] || [];
+                if (connections.length === 0) {
+                    return false; // Dead end
                 }
+                
+                // Take the FIRST connection (deterministic - ensures one path per input)
+                for (const [next, value] of connections) {
+                    path.push([current, next, value]);
+                    if (traceSinglePath(next, path, visited)) {
+                        return true; // Successfully reached output
+                    }
+                    path.pop(); // Backtrack if this path didn't work
+                }
+                
+                return false; // No valid path found
             }
             
-            for (const input of inputNodes) {
-                tracePaths(input, [], new Set());
+            // Trace exactly one path for each input socket
+            for (const inputNode of inputNodes) {
+                const path = [];
+                const visited = new Set();
+                if (traceSinglePath(inputNode, path, visited)) {
+                    allPaths.push(path);
+                }
+                // If no valid path exists for this input, it's simply skipped
             }
             
             // Calculate positions
@@ -824,6 +1019,7 @@
             let svg = `<?xml version="1.0" encoding="UTF-8"?>\n`;
             svg += `<!-- Physical dimensions: ${document.getElementById('scaleX').value}m × ${document.getElementById('scaleY').value}m -->\n`;
             svg += `<!-- Units: millimeters (1 SVG unit = 1mm) -->\n`;
+            svg += `<!-- Full Curves Mode: ${allPaths.length} curves (one per Column 0 socket) -->\n`;
             svg += `<svg width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" xmlns="http://www.w3.org/2000/svg">\n`;
             svg += `<g id="sankey_threads">\n`;
             
@@ -842,92 +1038,101 @@
                 const pathD = createSmoothCurvePath(points);
                 const color = getThreadColor(threadCount, allPaths.length);
                 
-                svg += `  <path id="thread_${threadCount}" class="full_thread" d="${pathD}" stroke="${color}" stroke-width="2" fill="none" opacity="0.7"/>\n`;
+                svg += `  <path id="thread_${threadCount}" class="full_thread from_${nodes[0]}" d="${pathD}" stroke="${color}" stroke-width="2" fill="none" opacity="0.7"/>\n`;
                 threadCount++;
             }
             
             svg += `</g>\n</svg>`;
             
             downloadFile('sankey_full.svg', svg, 'image/svg+xml');
-            setStatus(`Saved ${threadCount} full curves as SVG`);
+            setStatus(`Saved ${threadCount} full curves as SVG (one per Column 0 socket)`);
         }
         
         function generateSegmentedCurveSVG() {
             const [positions, widthMm, heightMm] = calculateSVGNodePositions();
-            
+            const nextNode = {};
+            for (const conn of connections) {
+                nextNode[conn.source] = conn.target;
+            }
+            const nLines = socketsPerColumn[0] || 10;
+            const allPaths = [];
+            for (let i = 0; i < nLines; i++) {
+                const path = [];
+                let cur = `Col0_Socket${i}`;
+                while (cur && positions[cur]) {
+                    path.push(cur);
+                    cur = nextNode[cur];
+                }
+                if (path.length >= 2) allPaths.push(path);
+            }
             let svg = `<?xml version="1.0" encoding="UTF-8"?>\n`;
             svg += `<!-- Physical dimensions: ${document.getElementById('scaleX').value}m × ${document.getElementById('scaleY').value}m -->\n`;
             svg += `<!-- Units: millimeters (1 SVG unit = 1mm) -->\n`;
+            svg += `<!-- Segmented: full curves split at sockets -->\n`;
             svg += `<svg width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" xmlns="http://www.w3.org/2000/svg">\n`;
             svg += `<g id="sankey_segments">\n`;
-            
             let segmentCount = 0;
-            for (const conn of connections) {
-                const p1 = positions[conn.source];
-                const p2 = positions[conn.target];
-                
-                if (!p1 || !p2) continue;
-                
-                const pathD = createSmoothCurvePath([p1, p2]);
-                
-                const srcCol = parseInt(conn.source.split('_')[0].replace('Col', ''));
-                let color;
-                if (srcCol === 0) color = 'hsl(120, 70%, 50%)';
-                else if (srcCol === numColumns - 1) color = 'hsl(0, 70%, 50%)';
-                else color = 'hsl(30, 70%, 50%)';
-                
-                svg += `  <path id="segment_${segmentCount}" class="segment from_${conn.source} to_${conn.target}" d="${pathD}" stroke="${color}" stroke-width="${Math.max(2, conn.value/2)}" fill="none" opacity="0.7"/>\n`;
-                segmentCount++;
+            for (let pi = 0; pi < allPaths.length; pi++) {
+                const path = allPaths[pi];
+                const points = path.map(n => positions[n]).filter(p => p);
+                for (let i = 0; i < points.length - 1; i++) {
+                    const pathD = createSmoothCurvePath([points[i], points[i + 1]]);
+                    const color = getThreadColor(pi, allPaths.length);
+                    svg += `  <path id="segment_${segmentCount}" d="${pathD}" stroke="${color}" stroke-width="2" fill="none" opacity="0.7"/>\n`;
+                    segmentCount++;
+                }
             }
-            
             svg += `</g>\n</svg>`;
-            
             downloadFile('sankey_segmented.svg', svg, 'image/svg+xml');
-            setStatus(`Saved ${segmentCount} segmented curves as SVG`);
+            setStatus(`Saved ${segmentCount} segments (full curves split at sockets)`);
         }
         
-        function calculateSVGNodePositions() {
-            const scaleX = parseFloat(document.getElementById('scaleX').value);
-            const scaleY = parseFloat(document.getElementById('scaleY').value);
-            
-            const widthMm = scaleX * 1000;
-            const heightMm = scaleY * 1000;
-            const marginX = widthMm * 0.1;
-            const marginY = heightMm * 0.1;
-            
+        function getColumnsFromConnections() {
             const columns = {};
             for (const conn of connections) {
                 const srcCol = parseInt(conn.source.split('_')[0].replace('Col', ''));
                 const tgtCol = parseInt(conn.target.split('_')[0].replace('Col', ''));
-                
                 if (!columns[srcCol]) columns[srcCol] = new Set();
                 if (!columns[tgtCol]) columns[tgtCol] = new Set();
-                
                 columns[srcCol].add(conn.source);
                 columns[tgtCol].add(conn.target);
             }
-            
-            const positions = {};
+            return columns;
+        }
+        
+        function calculatePositionsMm() {
+            const scaleX = parseFloat(document.getElementById('scaleX').value);
+            const scaleY = parseFloat(document.getElementById('scaleY').value);
+            const widthMm = scaleX * 1000;
+            const heightMm = scaleY * 1000;
+            const marginX = widthMm * 0.1;
+            const marginY = heightMm * 0.1;
+            const columns = getColumnsFromConnections();
             const sortedCols = Object.keys(columns).sort((a, b) => a - b);
             const xStep = sortedCols.length > 1 ? (widthMm - 2 * marginX) / (sortedCols.length - 1) : 0;
-            
+            const positions = {};
             sortedCols.forEach((col, colIdx) => {
                 const nodes = Array.from(columns[col]).sort((a, b) => {
                     const aSocket = parseInt(a.split('_Socket')[1]);
                     const bSocket = parseInt(b.split('_Socket')[1]);
                     return aSocket - bSocket;
                 });
-                
-                const x = marginX + (colIdx * xStep);
+                const baseX = columnX[col] != null ? columnX[col] : (marginX + colIdx * xStep);
                 const yStep = nodes.length > 1 ? (heightMm - 2 * marginY) / (nodes.length - 1) : 0;
-                
                 nodes.forEach((node, nodeIdx) => {
                     const y = marginY + (nodeIdx * yStep);
-                    positions[node] = [x, y];
+                    if (socketPositions[node]) {
+                        positions[node] = socketPositions[node].slice();
+                    } else {
+                        positions[node] = [baseX, y];
+                    }
                 });
             });
-            
             return [positions, widthMm, heightMm];
+        }
+        
+        function calculateSVGNodePositions() {
+            return calculatePositionsMm();
         }
         
         function createSmoothCurvePath(points) {
@@ -969,6 +1174,12 @@
         }
         
         // Event listeners
+        document.getElementById('numColumns').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                updatePreview();
+            }
+        });
         document.getElementById('scaleX').addEventListener('input', function() {
             updateScaleDisplay();
             if (connections.length > 0) drawCanvas();
@@ -983,15 +1194,120 @@
                 document.getElementById('seedValue').value = threadSeeds[threadId];
             }
         });
-        document.getElementById('selectedColumn').addEventListener('input', function() {
-            const col = parseInt(this.value);
-            if (socketsPerColumn[col] !== undefined) {
-                document.getElementById('socketsValue').value = socketsPerColumn[col];
-            }
+        document.getElementById('zoomSlider').addEventListener('input', function() {
+            previewZoom = parseInt(this.value) / 100;
+            document.getElementById('zoomValue').textContent = this.value + '%';
+            drawCanvas();
+        });
+        document.getElementById('panXSlider').addEventListener('input', function() {
+            panX = parseInt(this.value);
+            drawCanvas();
+        });
+        document.getElementById('panYSlider').addEventListener('input', function() {
+            panY = parseInt(this.value);
+            drawCanvas();
         });
         
+        let lastMousePx = [0, 0];
+        
+        function getCanvasMouse(e) {
+            const canvas = document.getElementById('preview');
+            const r = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / r.width;
+            const scaleY = canvas.height / r.height;
+            return [(e.clientX - r.left) * scaleX, (e.clientY - r.top) * scaleY];
+        }
+        
+        function hitTestColumnLabel(px, py) {
+            const s = window._lastDrawState;
+            if (!s || !s.columnCenterPx) return null;
+            const cols = Object.keys(s.columnCenterPx).map(Number);
+            for (const col of cols) {
+                const lx = s.columnCenterPx[col];
+                const ly = s.labelY;
+                if (Math.abs(px - lx) < 45 && Math.abs(py - ly) < 14) return col;
+            }
+            return null;
+        }
+        
+        function hitTestSocket(px, py) {
+            const s = window._lastDrawState;
+            if (!s || !s.positions) return null;
+            const r = 10;
+            let best = null, bestD = r * r;
+            for (const [node, [x, y]] of Object.entries(s.positions)) {
+                const d = (px - x) ** 2 + (py - y) ** 2;
+                if (d < bestD) { bestD = d; best = node; }
+            }
+            return best;
+        }
+        
+        function canvasMouseDown(e) {
+            const [px, py] = getCanvasMouse(e);
+            const col = hitTestColumnLabel(px, py);
+            if (col != null) {
+                dragColumn = col;
+                lastMousePx = [px, py];
+                return;
+            }
+            const node = hitTestSocket(px, py);
+            if (node) {
+                dragNode = node;
+                lastMousePx = [px, py];
+                const s = window._lastDrawState;
+                if (s && s.positionsMm && !socketPositions[node]) {
+                    socketPositions[node] = s.positionsMm[node].slice();
+                }
+            }
+        }
+        
+        function canvasMouseMove(e) {
+            const [px, py] = getCanvasMouse(e);
+            const s = window._lastDrawState;
+            if (!s) return;
+            const dxPx = px - lastMousePx[0], dyPx = py - lastMousePx[1];
+            const dxMm = dxPx * (s.widthMm / s.drawW), dyMm = dyPx * (s.heightMm / s.drawH);
+            lastMousePx = [px, py];
+            
+            if (dragColumn !== null) {
+                if (columnX[dragColumn] == null) {
+                    const cols = Object.keys(s.columnCenterPx).map(Number).sort((a,b)=>a-b);
+                    const idx = cols.indexOf(dragColumn);
+                    const xStep = cols.length > 1 ? (s.widthMm - s.widthMm * 0.2) / (cols.length - 1) : 0;
+                    columnX[dragColumn] = s.widthMm * 0.1 + idx * xStep;
+                }
+                columnX[dragColumn] += dxMm;
+                const columns = getColumnsFromConnections();
+                const nodes = Array.from(columns[dragColumn] || []);
+                nodes.forEach(n => {
+                    if (socketPositions[n]) socketPositions[n][0] += dxMm;
+                    else socketPositions[n] = [s.positionsMm[n][0] + dxMm, s.positionsMm[n][1]];
+                });
+                drawCanvas();
+                return;
+            }
+            if (dragNode) {
+                if (!socketPositions[dragNode]) socketPositions[dragNode] = s.positionsMm[dragNode].slice();
+                socketPositions[dragNode][0] += dxMm;
+                socketPositions[dragNode][1] += dyMm;
+                drawCanvas();
+            }
+        }
+        
+        function canvasMouseUp() {
+            dragColumn = null;
+            dragNode = null;
+        }
+        
         // Initialize on load
-        window.addEventListener('load', init);
+        window.addEventListener('load', function() {
+            init();
+            const canvas = document.getElementById('preview');
+            canvas.addEventListener('mousedown', canvasMouseDown);
+            canvas.addEventListener('mousemove', canvasMouseMove);
+            canvas.addEventListener('mouseup', canvasMouseUp);
+            canvas.addEventListener('mouseleave', canvasMouseUp);
+        });
         window.addEventListener('resize', drawCanvas);
     </script>
 </body>

@@ -528,8 +528,7 @@
             const newNumCols = parseInt(document.getElementById('numColumns').value);
             if (newNumCols !== numColumns) {
                 numColumns = newNumCols;
-                
-                // Initialize new columns/threads
+                columnX = {};  // reset column positions so they space evenly across physical dimensions
                 for (let i = 0; i < numColumns; i++) {
                     if (socketsPerColumn[i] === undefined) {
                         socketsPerColumn[i] = 10;
@@ -538,8 +537,6 @@
                         threadSeeds[i] = 42;
                     }
                 }
-                
-                // Update UI limits
                 document.getElementById('selectedThread').max = Math.max(0, numColumns - 2);
             }
             
@@ -713,6 +710,8 @@
                     e.preventDefault();
                     dragColumn = parseInt(this.dataset.col);
                     lastMousePx = getCanvasMouse(e);
+                    document.addEventListener('mousemove', docColumnDragMove);
+                    document.addEventListener('mouseup', docColumnDragUp);
                 });
                 const inp = document.createElement('input');
                 inp.type = 'number';
@@ -1229,6 +1228,9 @@
                 updatePreview();
             }
         });
+        document.getElementById('numColumns').addEventListener('change', function() {
+            updatePreview();
+        });
         document.getElementById('scaleX').addEventListener('input', function() {
             updateScaleDisplay();
             if (connections.length > 0) reframeDesign();
@@ -1333,6 +1335,36 @@
             document.removeEventListener('mouseup', docPanUp);
         }
         
+        function docColumnDragMove(e) {
+            if (dragColumn == null) return;
+            var s = window._lastDrawState;
+            if (!s || !s.positionsMm) return;
+            var pxpy = getCanvasMouse(e);
+            var dxPx = pxpy[0] - lastMousePx[0], dyPx = pxpy[1] - lastMousePx[1];
+            var dxMm = dxPx * (s.widthMm / s.drawW), dyMm = dyPx * (s.heightMm / s.drawH);
+            lastMousePx = pxpy;
+            if (columnX[dragColumn] == null) {
+                var cols = Object.keys(s.columnCenterPx || {}).map(Number).sort(function(a,b){ return a - b; });
+                var idx = cols.indexOf(dragColumn);
+                var xStep = cols.length > 1 ? (s.widthMm - s.widthMm * 0.2) / (cols.length - 1) : 0;
+                columnX[dragColumn] = s.widthMm * 0.1 + idx * xStep;
+            }
+            columnX[dragColumn] += dxMm;
+            var columns = getColumnsFromConnections();
+            var nodes = Array.from(columns[dragColumn] || []);
+            nodes.forEach(function(n) {
+                if (socketPositions[n]) socketPositions[n][0] += dxMm;
+                else socketPositions[n] = [s.positionsMm[n][0] + dxMm, s.positionsMm[n][1]];
+            });
+            drawCanvas();
+        }
+        
+        function docColumnDragUp() {
+            dragColumn = null;
+            document.removeEventListener('mousemove', docColumnDragMove);
+            document.removeEventListener('mouseup', docColumnDragUp);
+        }
+        
         function updateCanvasCursor(px, py) {
             const viewportEl = document.getElementById('designViewport');
             if (!viewportEl) return;
@@ -1389,8 +1421,9 @@
         function canvasMouseUp() {
             if (dragView) {
                 docPanUp();
+            } else if (dragColumn != null) {
+                docColumnDragUp();
             } else {
-                dragColumn = null;
                 dragNode = null;
             }
             var viewportEl = document.getElementById('designViewport');
